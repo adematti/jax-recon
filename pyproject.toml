@@ -1,0 +1,21 @@
+[build-system]
+requires = [
+    "setuptools>=61",
+    "wheel",
+    "setuptools_scm>=6.2",
+    "pip>=21.2",
+]
+
+[project]
+name = "jax-recon"
+authors = [{name = "Arnaud de Mattia"}]
+description = "JAX-powered BAO reconstruction"
+version = "0.1.0"
+dependencies = ["jax"]
+readme = "README.md"
+requires-python = ">=3.10"
+urls = {Repository = "https://github.com/adematti/jax-recon"}
+classifiers = ["Programming Language :: Python :: 3"]
+
+[tool.setuptools]
+packages = ["jaxrecon"]
