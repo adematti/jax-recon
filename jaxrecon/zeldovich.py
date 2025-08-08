@@ -13,7 +13,7 @@ def kernel_gaussian(mattrs: MeshAttrs, smoothing_radius=15.):
     return jnp.exp(- 0.5 * sum((kk * smoothing_radius)**2 for kk in mattrs.kcoords(sparse=True)))
 
 
-def estimate_mesh_delta(mesh_data: RealMeshField | ComplexMeshField, mesh_randoms: RealMeshField | ComplexMeshField=None, threshold: float=None, smoothing_radius: float=15.):
+def estimate_mesh_delta(mesh_data: RealMeshField | ComplexMeshField, mesh_randoms: RealMeshField | ComplexMeshField=None, threshold_randoms: float | jax.Array=None, smoothing_radius: float=15.):
 
     mattrs = mesh_data.attrs
 
@@ -32,18 +32,34 @@ def estimate_mesh_delta(mesh_data: RealMeshField | ComplexMeshField, mesh_random
         kernel = kernel_gaussian(mattrs, smoothing_radius=smoothing_radius)
         mesh_data = (_2c(mesh_data) * kernel).c2r()
         if mesh_randoms is not None:
-            mesh_randoms = (mesh_randoms * kernel).c2r()
+            mesh_randoms = (_2c(mesh_randoms) * kernel).c2r()
 
     mesh_data = _2r(mesh_data)
     if mesh_randoms is not None:
+        mesh_randoms = _2r(mesh_randoms)
         sum_data, sum_randoms = mesh_data.sum(), mesh_randoms.sum()
         alpha = sum_data * 1. / sum_randoms
         mesh_delta = mesh_data - alpha * mesh_randoms
-        if threshold is not None:
-            mesh_delta = mesh_delta.clone(value=jnp.where(mesh_randoms.value > threshold, mesh_delta.value / (alpha * mesh_randoms.value), 0.))
+        if threshold_randoms is not None:
+            mesh_delta = mesh_delta.clone(value=jnp.where(mesh_randoms.value > threshold_randoms, mesh_delta.value / (alpha * mesh_randoms.value), 0.))
     else:
         mesh_delta = mesh_data / mesh_data.mean() - 1.
     return mesh_delta
+
+
+def _get_threshold_randoms(randoms, threshold_randoms: float=0.01):
+
+    if isinstance(threshold_randoms, tuple):
+        threshold_method, threshold_value = threshold_randoms
+    else:
+        threshold_method, threshold_value = 'noise', threshold_randoms
+    assert threshold_method in ['noise', 'mean']
+
+    if threshold_method == 'noise':
+        threshold_randoms = threshold_value * jnp.sum(randoms.weights**2) / randoms.sum()
+    else:
+        threshold_randoms = threshold_value * randoms.sum() / randoms.size
+    return threshold_randoms
 
 
 def estimate_particle_delta(fkp: ParticleField | FKPField, resampler: str='cic', halo_size: int=None, smoothing_radius: float=15., threshold_randoms: float=0.01):
@@ -51,16 +67,15 @@ def estimate_particle_delta(fkp: ParticleField | FKPField, resampler: str='cic',
     data, randoms = fkp, None
     if isinstance(fkp, FKPField):
         data, randoms = fkp.data, fkp.randoms
-    kw = dict(resampler=resampler, compensate=False, interlacing=0, halo_size=halo_size, out='complex')
-    mesh_data = data.paint(**kw)
+    kw = dict(resampler=resampler, compensate=False, interlacing=0, halo_size=halo_size)
+    mesh_data = data.paint(**kw, out='complex')
     del data
-    mesh_randoms, threshold = None, None
     if randoms is not None:
-        threshold = threshold_randoms * randoms.sum() / randoms.size
-        mesh_randoms = randoms.paint(**kw)
-        del randoms
-
-    return estimate_mesh_delta(mesh_data, mesh_randoms=mesh_randoms, threshold=threshold, smoothing_radius=smoothing_radius)
+        mesh_randoms = randoms.paint(**kw, out='complex')
+        threshold_randoms = _get_threshold_randoms(randoms, threshold_randoms=threshold_randoms)
+    else:
+        threshold_randoms, mesh_randoms = None, None
+    return estimate_mesh_delta(mesh_data, mesh_randoms=mesh_randoms, threshold_randoms=threshold_randoms, smoothing_radius=smoothing_radius)
 
 
 def _get_los_vector(los: str | np.ndarray, ndim=3):
@@ -209,7 +224,6 @@ class PlaneParallelFFTReconstruction(BaseReconstruction):
             # ... and we have to, because it is turned to real when hermitian symmetry is assumed?
             if self.mattrs.hermitian: mesh_psi *= ivec[axis] != self.mattrs.meshsize[axis] // 2
             mesh_psis.append(mesh_psi.c2r())
-            print(mesh_psis[-1].std())
             del mesh_psi
         self.mesh_psi = mesh_psis
 
@@ -319,16 +333,18 @@ class IterativeFFTParticleReconstruction(BaseReconstruction):
         data, randoms = fkp, None
         if isinstance(fkp, FKPField):
             data, randoms = fkp.data, fkp.randoms
-        kw = self._kw_resampler | dict(interlacing=0, out='complex')
-        threshold = None
+        kw = self._kw_resampler | dict(interlacing=0)
         kernel = kernel_gaussian(self.mattrs, smoothing_radius=smoothing_radius)
         if randoms is not None:
-            threshold = threshold_randoms * randoms.sum() / randoms.size
-            mesh_randoms = (randoms.paint(**kw) * kernel).c2r()
+            mesh_randoms = randoms.paint(**kw, out='complex')
+            threshold_randoms = _get_threshold_randoms(randoms, threshold_randoms=threshold_randoms)
+            mesh_randoms = (mesh_randoms * kernel).c2r()
             del randoms
+        else:
+            threshold_randoms, mesh_randoms = None, None
         self.data_rec = self.data = data
         for iter in range(niterations):
-            mesh_delta = estimate_mesh_delta((self.data_rec.paint(**kw) * kernel).c2r(), mesh_randoms=mesh_randoms, threshold=threshold, smoothing_radius=None)
+            mesh_delta = estimate_mesh_delta((self.data_rec.paint(**kw, out='complex') * kernel).c2r(), mesh_randoms=mesh_randoms, threshold_randoms=threshold_randoms, smoothing_radius=None)
             mesh_delta = mesh_delta / self.bias()
             self.data_rec, self.mesh_psi = self._iterate(mesh_delta, self.data, self.data_rec, return_psi=iter == niterations - 1)
 
@@ -337,6 +353,7 @@ class IterativeFFTParticleReconstruction(BaseReconstruction):
         kvec, ivec = self.mattrs.kcoords(sparse=True), self.mattrs.kcoords(kind='index', sparse=True)
         k2 = sum(kk**2 for kk in kvec)
         k2 = jnp.where(k2 == 0., 1., k2)
+
         mesh_delta_k2 = mesh_delta.r2c() / k2
         del k2
 

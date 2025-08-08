@@ -18,10 +18,7 @@ pip install git+https://github.com/adematti/jax-recon.git
 
 Dependencies:
 - `jax`
-- `jaxlib`
 - `jax-power`
-- `numpy`
-- `scipy`
 
 ---
 
@@ -38,8 +35,8 @@ with create_sharding_mesh() as sharding_mesh:  # distribute mesh and particles
     attrs = get_mesh_attrs(data_positions, randoms_positions, boxpad=1.2, cellsize=10.)
 
     # Define FKP field = data - randoms
-    data = ParticleField(data_positions, data_weights, attrs=attrs, exchange=True)
-    randoms = ParticleField(randoms_positions, randoms_weights, attrs=attrs, exchange=True)
+    data = ParticleField(data_positions, data_weights, attrs=attrs, exchange=True, return_inverse=True)
+    randoms = ParticleField(randoms_positions, randoms_weights, attrs=attrs, exchange=True, return_inverse=True)
     fkp = FKPField(data, randoms)
     # Line-of-sight "los" can be local (None, default) or an axis, 'x', 'y', 'z', or a 3-vector
     # In case of IterativeFFTParticleReconstruction, and multi-GPU computation, provide the size of halo regions in cell units. E.g., maximum displacement is ~ 40 Mpc/h => 4 * chosen cell size => provide halo_size=2
@@ -47,11 +44,16 @@ with create_sharding_mesh() as sharding_mesh:  # distribute mesh and particles
     # A shortcut of the above is:
     # If you are using IterativeFFTParticleReconstruction, displacements are to be taken at the reconstructed data real-space positions;
     # in this case, do: data_positions_rec = recon.read_shifted_positions('data')
-    data_positions_rec = recon.read_shifted_positions(data_positions)
+    data_positions_rec = recon.read_shifted_positions(data.positions)
     # RecSym = remove large scale RSD from randoms
-    randoms_positions_rec = recon.read_shifted_positions(randoms_positions)
+    randoms_positions_rec = recon.read_shifted_positions(randoms.positions)
     # or RecIso
     # randoms_positions_rec = recon.read_shifted_positions(randoms_positions, field='disp')
+    # Now be careful! For multi-GPU computation, these are the weights for the *exchanged* particles.
+    # If you want weights for the input data_positions and randoms_positions:
+    data_positions_rec = data.exchange_inverse(data_positions_rec)
+    randoms_positions_rec = randoms.exchange_inverse(randoms_positions_rec)
+
 ```
 ---
 
@@ -65,6 +67,5 @@ with create_sharding_mesh() as sharding_mesh:  # distribute mesh and particles
 
 - Inspired by [`pyrecon`](https://github.com/cosmodesi/pyrecon)
 - Mesh tools from [`jax-power`](https://github.com/adematti/jax-power)
-- Developed by [Your Name](mailto:your.email@example.com)
 
 ---
