@@ -201,7 +201,7 @@ class BaseReconstruction(object):
         positions = _format_positions(positions)
         shifts = self.read_shifts(positions, field=field, **kwargs)
         positions = positions - shifts
-        offset = self.boxcenter - self.boxsize / 2.
+        offset = self.mattrs.boxcenter - self.mattrs.boxsize / 2.
         if wrap: positions = (positions - offset) % self.mattrs.boxsize + offset
         return positions
 
