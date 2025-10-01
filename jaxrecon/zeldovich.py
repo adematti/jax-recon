@@ -62,12 +62,12 @@ def _get_threshold_randoms(randoms, threshold_randoms: float=0.01):
     return threshold_randoms
 
 
-def estimate_particle_delta(fkp: ParticleField | FKPField, resampler: str='cic', halo_size: int=None, smoothing_radius: float=15., threshold_randoms: float=0.01):
+def estimate_particle_delta(fkp: ParticleField | FKPField, resampler: str='cic', halo_add: int=0, smoothing_radius: float=15., threshold_randoms: float=0.01):
 
     data, randoms = fkp, None
     if isinstance(fkp, FKPField):
         data, randoms = fkp.data, fkp.randoms
-    kw = dict(resampler=resampler, compensate=False, interlacing=0, halo_size=halo_size)
+    kw = dict(resampler=resampler, compensate=False, interlacing=0, halo_add=halo_add)
     mesh_data = data.paint(**kw, out='complex')
     del data
     if randoms is not None:
@@ -106,7 +106,7 @@ def _format_positions(positions: jax.Array | ParticleField):
 class BaseReconstruction(object):
 
     def __init__(self, delta: RealMeshField | ParticleField | FKPField, growth_rate: float | Callable=0., bias: float | Callable=1., los: str | np.ndarray=None, **kwargs):
-        self._kw_resampler = {name: kwargs.pop(name) for name in ['resampler', 'halo_size'] if name in kwargs}
+        self._kw_resampler = {name: kwargs.pop(name) for name in ['resampler', 'halo_add'] if name in kwargs}
         if not isinstance(delta, RealMeshField):
             delta = estimate_particle_delta(delta, **self._kw_resampler, **{name: kwargs.pop(name) for name in ['smoothing_radius', 'threshold_randoms'] if name in kwargs})
         self._growth_rate = growth_rate
@@ -316,7 +316,7 @@ class IterativeFFTParticleReconstruction(BaseReconstruction):
         self._bias = bias
         self.mattrs = particles.attrs
         self.los = _format_los(los=los)
-        self._kw_resampler = {name: kwargs.pop(name) for name in ['resampler', 'halo_size'] if name in kwargs}
+        self._kw_resampler = {name: kwargs.pop(name) for name in ['resampler', 'halo_add'] if name in kwargs}
         self._run(particles, **{name: kwargs.pop(name) for name in ['niterations', 'smoothing_radius', 'threshold_randoms'] if name in kwargs})
 
     def _run(self, fkp, niterations=3, smoothing_radius=15., threshold_randoms=0.01):

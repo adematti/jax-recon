@@ -124,7 +124,7 @@ def test_iterative_fft_particle():
         data = data.exchange(return_inverse=True)
         randoms = randoms.exchange(return_inverse=True)
         fkp = FKPField(data, randoms, attrs=mattrs)
-        recon = IterativeFFTParticleReconstruction(fkp, growth_rate=growth_rate, bias=bias, los=los, halo_size=3, niterations=niterations, threshold_randoms=threshold_randoms)
+        recon = IterativeFFTParticleReconstruction(fkp, growth_rate=growth_rate, bias=bias, los=los, halo_add=3, niterations=niterations, threshold_randoms=threshold_randoms)
         shifts = allgather(randoms.exchange_inverse(recon.read_shifts(randoms)))
         data_shifts = allgather(data.exchange_inverse(recon.read_shifts('data')))
         assert np.allclose(ref_shifts, shifts)
