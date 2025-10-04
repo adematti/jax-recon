@@ -120,16 +120,16 @@ class BaseReconstruction(object):
         if callable(self._growth_rate):
             if distance is None:
                 distance = sum(xx**2 for xx in self.mattrs.xcoords())**0.5
-            return self._growth_rate(distance)
-        return self._growth_rate
+            return jnp.asarray(self._growth_rate(distance))
+        return jnp.asarray(self._growth_rate)
 
     def bias(self, distance: jax.Array=None):
         """Return bias."""
         if callable(self._bias):
             if distance is None:
                 distance = sum(xx**2 for xx in self.mattrs.xcoords())**0.5
-            return self._bias(distance)
-        return self._bias
+            return jnp.asarray(self._bias(distance))
+        return jnp.asarray(self._bias)
 
     def read_shifts(self, positions: jax.Array | ParticleField, field='disp+rsd', **kwargs):
         """
