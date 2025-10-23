@@ -222,7 +222,7 @@ class PlaneParallelFFTReconstruction(BaseReconstruction):
             mesh_psi = 1j * kvec[axis] / k2 / (1. + beta * mu2) * mesh_delta
             # i = N / 2 is pure complex, we can remove it safely
             # ... and we have to, because it is turned to real when hermitian symmetry is assumed?
-            if self.mattrs.hermitian: mesh_psi *= ivec[axis] != self.mattrs.meshsize[axis] // 2
+            if self.mattrs.is_hermitian: mesh_psi *= ivec[axis] != self.mattrs.meshsize[axis] // 2
             mesh_psis.append(mesh_psi.c2r())
             del mesh_psi
         self.mesh_psi = mesh_psis
@@ -256,7 +256,7 @@ class IterativeFFTReconstruction(BaseReconstruction):
             mesh_psi = 1j * kvec[axis] * mesh_delta_k2
             # i = N / 2 is pure complex, we can remove it safely
             # ... and we have to, because it is turned to real when hermitian symmetry is assumed?
-            if self.mattrs.hermitian: mesh_psi *= ivec[axis] != self.mattrs.meshsize[axis] // 2
+            if self.mattrs.is_hermitian: mesh_psi *= ivec[axis] != self.mattrs.meshsize[axis] // 2
             mesh_psis.append(mesh_psi.c2r())
         self.mesh_psi = mesh_psis
 
@@ -295,7 +295,7 @@ class IterativeFFTReconstruction(BaseReconstruction):
             for iaxis in range(mesh_delta_k2.ndim):
                 for jaxis in range(iaxis, mesh_delta_k2.ndim):
                     mask = 1.
-                    if self.mattrs.hermitian:
+                    if self.mattrs.is_hermitian:
                         mask = (ivec[iaxis] != self.mattrs.meshsize[iaxis] // 2) & (ivec[jaxis] != self.mattrs.meshsize[jaxis] // 2)
                         mask |= (ivec[iaxis] == self.mattrs.meshsize[iaxis] // 2) & (ivec[jaxis] == self.mattrs.meshsize[jaxis] // 2)
                     disp_deriv = kvec[iaxis] * kvec[jaxis] * mesh_delta_k2 * mask  # delta_k already divided by k^{2}
@@ -365,7 +365,7 @@ class IterativeFFTParticleReconstruction(BaseReconstruction):
                 continue
 
             mesh_psi = 1j * kvec[axis] * mesh_delta_k2
-            if self.mattrs.hermitian: mesh_psi *= ivec[axis] != self.mattrs.meshsize[axis] // 2
+            if self.mattrs.is_hermitian: mesh_psi *= ivec[axis] != self.mattrs.meshsize[axis] // 2
             mesh_psi = mesh_psi.c2r()
             # Reading shifts at reconstructed data real-space positions
             shifts.append(mesh_psi.read(data_rec.positions, **self._kw_resampler))
