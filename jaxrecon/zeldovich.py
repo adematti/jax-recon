@@ -337,7 +337,7 @@ class IterativeFFTReconstruction(BaseReconstruction):
             mesh_psis.append(mesh_psi.c2r())
         self.mesh_psi = mesh_psis
 
-    def _iterate(self, mesh_delta_real):
+    def _iterate(self, mesh_delta_real, method='spherical_harmonics'):
         init = mesh_delta_real is self.mesh_delta
         # This is an implementation of eq. 22 and 24 in https://arxiv.org/pdf/1504.02591.pdf
         # \delta_{g,\mathrm{real},n} is self.mesh_delta_real
@@ -345,16 +345,18 @@ class IterativeFFTReconstruction(BaseReconstruction):
         # First compute \delta(k) / k^{2} based on current \delta_{g,\mathrm{real},n} to estimate \phi_{\mathrm{est},n} (eq. 24)
         kvec, ivec = self.mattrs.kcoords(sparse=True), self.mattrs.kcoords(kind='index', sparse=True)
         k2 = sum(kk**2 for kk in kvec)
-        k2 = jnp.where(k2 == 0., 1., k2)
-        mesh_delta_k2 = mesh_delta_real.r2c() / k2
-        del k2
-        del mesh_delta_real
+        mesh_delta_k2 = mesh_delta_real.r2c() / (jnp.where(k2 == 0., 1., k2))
+        del k2, mesh_delta_real
+        beta = self.growth_rate() / self.bias()
+
         # Now compute \beta \nabla \cdot (\nabla \phi_{\mathrm{est},n} \cdot \hat{r}) \hat{r}
         # In the plane-parallel case (self.los is a given vector), this is simply \beta IFFT((\hat{k} \cdot \hat{\eta})^{2} \delta(k))
         if self.los is not None:
+            k2 = sum(kk**2 for kk in kvec)
             # Global los
-            disp_deriv = mesh_delta_k2 * sum(kk * ll for kk, ll in zip(kvec, self.los))**2 # mesh_delta_k2 already divided by k^{2}
-            factor = beta = self.growth_rate() / self.bias()
+            disp_deriv = mesh_delta_k2 * sum(kk * ll for kk, ll in zip(kvec, self.los))**2
+            del k2
+            factor = beta
             if init:
                 # Burden et al. 2015: 1504.02591, eq. 12 (flat sky approximation)
                 factor = beta / (1. + beta)
@@ -365,24 +367,35 @@ class IterativeFFTReconstruction(BaseReconstruction):
             # In the local los case, \beta \nabla \cdot (\nabla \phi_{\mathrm{est},n} \cdot \hat{r}) \hat{r} is:
             # \beta \partial_{i} \partial_{j} \phi_{\mathrm{est},n} \hat{r}_{j} \hat{r}_{i}
             # i.e. \beta IFFT(k_{i} k_{j} \delta(k) / k^{2}) \hat{r}_{i} \hat{r}_{j} => 6 FFTs
-            xvec = self.mattrs.xcoords(sparse=True)
-            x2 = sum(xx**2 for xx in xvec)
-            beta = self.growth_rate() / self.bias()
-            mesh_delta_real = self.mesh_delta
-            for iaxis in range(mesh_delta_k2.ndim):
-                for jaxis in range(iaxis, mesh_delta_k2.ndim):
-                    mask = 1.
-                    if self.mattrs.is_hermitian:
-                        mask = (ivec[iaxis] != self.mattrs.meshsize[iaxis] // 2) & (ivec[jaxis] != self.mattrs.meshsize[jaxis] // 2)
-                        mask |= (ivec[iaxis] == self.mattrs.meshsize[iaxis] // 2) & (ivec[jaxis] == self.mattrs.meshsize[jaxis] // 2)
-                    disp_deriv = kvec[iaxis] * kvec[jaxis] * mesh_delta_k2 * mask  # delta_k already divided by k^{2}
-                    disp_deriv = disp_deriv.c2r() * (xvec[iaxis] * xvec[jaxis]) / x2
-                    factor = (1. + (iaxis != jaxis)) * beta  # we have j >= i and double-count j > i to account for j < i
-                    if init:
-                        # Burden et al. 2015: 1504.02591, eq. 12 (flat sky approximation)
-                        factor /= (1. + beta)
-                    # Remove RSD part
-                    mesh_delta_real = mesh_delta_real - factor * disp_deriv
+            # TODO: test with spherical harmonics decomposition?
+            ndim = self.mattrs.ndim
+            ij = np.array([(iaxis, jaxis) for iaxis in range(ndim) for jaxis in range(iaxis, ndim)])
+            #xvec = self.mattrs.xcoords(sparse=True)
+            #x2 = sum(xx**2 for xx in xvec)
+
+            def _compute_disp_deriv(mesh_delta_real, ij):
+                mask = 1.
+                if self.mattrs.is_hermitian:
+                    vec = self.mattrs.kcoords(kind='index', sparse=False)
+                    (iveci, ivecj) = (jax.lax.select_n(axis, *vec) for axis in ij)
+                    meshsize = tuple(jax.lax.select_n(axis, *self.mattrs.meshsize) for axis in ij)
+                    mask = (iveci != meshsize[0] // 2) & (ivecj != meshsize[1] // 2)
+                    mask |= (iveci == meshsize[0] // 2) & (ivecj == meshsize[1] // 2)
+                vec = self.mattrs.kcoords(sparse=False)
+                (kveci, kvecj) = (jax.lax.select_n(axis, *vec) for axis in ij)
+                disp_deriv = mask * mesh_delta_k2 * (kveci * kvecj) # delta_k already divided by k^{2}
+                factor = (1. + (ij[0] != ij[1])) * beta  # we have j >= i and double-count j > i to account for j < i
+                if init:
+                    # Burden et al. 2015: 1504.02591, eq. 12 (flat sky approximation)
+                    factor /= (1. + beta)
+                # Remove RSD part
+                vec = self.mattrs.xcoords(sparse=False)
+                (xveci, xvecj) = [jax.lax.select_n(axis, *vec) for axis in ij]
+                mesh_delta_real -= factor * disp_deriv.c2r() * (xveci * xvecj) / sum(xx**2 for xx in vec)
+                return mesh_delta_real, ij
+
+            mesh_delta_real = jax.lax.scan(_compute_disp_deriv, init=self.mesh_delta, xs=ij)[0]
+
         return mesh_delta_real
 
 
@@ -441,7 +454,6 @@ class IterativeFFTParticleReconstruction(BaseReconstruction):
             if not return_psi and self.los is not None and self.los[axis] == 0:
                 shifts.append(data_rec.positions[..., axis] * 0.)
                 continue
-
             mesh_psi = 1j * kvec[axis] * mesh_delta_k2
             if self.mattrs.is_hermitian: mesh_psi *= ivec[axis] != self.mattrs.meshsize[axis] // 2
             mesh_psi = mesh_psi.c2r()
@@ -449,6 +461,7 @@ class IterativeFFTParticleReconstruction(BaseReconstruction):
             shifts.append(mesh_psi.read(data_rec.positions, **self._kw_resampler))
             if return_psi: mesh_psis.append(mesh_psi)
             del mesh_psi
+
         shifts = jnp.column_stack(shifts)
         distance = jnp.sqrt(jnp.sum(data.positions**2, axis=-1, keepdims=True))
         if self.los is None:

@@ -47,8 +47,8 @@ def allgather_particles(particles):
 def test_plane_parallel():
     mattrs = MeshAttrs(boxsize=1000., boxcenter=600., meshsize=64)
     pattrs = mattrs.clone(boxsize=800.)
-    data = get_random_catalog(pattrs, seed=42).clone(attrs=mattrs)
-    randoms = get_random_catalog(pattrs, seed=84).clone(attrs=mattrs)
+    shard_data = get_random_catalog(pattrs, seed=42).clone(attrs=mattrs)
+    shard_randoms = get_random_catalog(pattrs, seed=84).clone(attrs=mattrs)
     growth_rate, bias = 0.8, 1.
     threshold_randoms = ('noise', 0.01)
     #threshold_randoms = ('mean', 0.01)
@@ -56,7 +56,7 @@ def test_plane_parallel():
     from pyrecon import PlaneParallelFFTReconstruction as RefPlaneParallelFFTReconstruction
 
     for los in ['x', 'y', 'z']:
-        ref_data, ref_randoms = allgather_particles(data), allgather_particles(randoms)
+        ref_data, ref_randoms = allgather_particles(shard_data), allgather_particles(shard_randoms)
         recon = RefPlaneParallelFFTReconstruction(f=growth_rate, bias=bias, data_positions=ref_data.positions, data_weights=ref_data.weights,
                                                   randoms_positions=ref_randoms.positions, randoms_weights=ref_randoms.weights,
                                                   boxsize=mattrs.boxsize, boxcenter=mattrs.boxcenter, nmesh=mattrs.meshsize, los=los, mpiroot=0,
@@ -64,8 +64,8 @@ def test_plane_parallel():
         fields = ['rsd', 'disp', 'disp+rsd']
         ref_shifts = {field: recon.read_shifts(ref_randoms.positions, field=field) for field in fields}
         ref_shifted_positions = {field: recon.read_shifted_positions(ref_randoms.positions, field=field) for field in fields}
-        data = data.exchange(return_inverse=True)
-        randoms = randoms.exchange(return_inverse=True)
+        data = shard_data.exchange(return_inverse=True)
+        randoms = shard_randoms.exchange(return_inverse=True)
         fkp = FKPField(data, randoms, attrs=mattrs)
         delta = estimate_particle_delta(fkp, threshold_randoms=threshold_randoms)
         recon = jax.jit(PlaneParallelFFTReconstruction, static_argnames=['los'])(delta, growth_rate=growth_rate, bias=bias, los=los)
@@ -80,8 +80,8 @@ def test_plane_parallel():
 def test_iterative_fft():
     mattrs = MeshAttrs(boxsize=1000., boxcenter=600., meshsize=64)
     pattrs = mattrs.clone(boxsize=800.)
-    data = get_random_catalog(pattrs, seed=42).clone(attrs=mattrs).exchange()
-    randoms = get_random_catalog(pattrs, seed=84).clone(attrs=mattrs).exchange()
+    shard_data = get_random_catalog(pattrs, seed=42).clone(attrs=mattrs).exchange()
+    shard_randoms = get_random_catalog(pattrs, seed=84).clone(attrs=mattrs).exchange()
     growth_rate, bias = 0.8, 2.
     threshold_randoms = ('noise', 0.01)
     #threshold_randoms = ('mean', 0.01)
@@ -91,7 +91,7 @@ def test_iterative_fft():
     from pyrecon import IterativeFFTReconstruction as RefIterativeFFTReconstruction
 
     for los in [None, 'x', 'y', 'z']:
-        ref_data, ref_randoms = allgather_particles(data), allgather_particles(randoms)
+        ref_data, ref_randoms = allgather_particles(shard_data), allgather_particles(shard_randoms)
         recon = RefIterativeFFTReconstruction(f=growth_rate, bias=bias, data_positions=ref_data.positions, data_weights=ref_data.weights,
                                               randoms_positions=ref_randoms.positions, randoms_weights=ref_randoms.weights,
                                               boxsize=mattrs.boxsize, boxcenter=mattrs.boxcenter, nmesh=mattrs.meshsize, los=los, mpiroot=0,
@@ -99,8 +99,8 @@ def test_iterative_fft():
         fields = ['rsd', 'disp', 'disp+rsd']
         ref_shifts = {field: recon.read_shifts(ref_randoms.positions, field=field) for field in fields}
         ref_shifted_positions = {field: recon.read_shifted_positions(ref_randoms.positions, field=field) for field in fields}
-        data = data.exchange(return_inverse=True)
-        randoms = randoms.exchange(return_inverse=True)
+        data = shard_data.exchange(return_inverse=True)
+        randoms = shard_randoms.exchange(return_inverse=True)
         fkp = FKPField(data, randoms, attrs=mattrs)
         delta = estimate_particle_delta(fkp, threshold_randoms=threshold_randoms)
         recon = jax.jit(IterativeFFTReconstruction, static_argnames=['los', 'niterations'])(delta, growth_rate=growth_rate, bias=bias, los=los, niterations=niterations)
@@ -114,8 +114,8 @@ def test_iterative_fft():
 def test_iterative_fft_particle():
     mattrs = MeshAttrs(boxsize=1000., boxcenter=600., meshsize=128)
     pattrs = mattrs.clone(boxsize=800.)
-    data = get_random_catalog(pattrs, seed=42).clone(attrs=mattrs).exchange()
-    randoms = get_random_catalog(pattrs, seed=84).clone(attrs=mattrs).exchange()
+    shard_data = get_random_catalog(pattrs, seed=42).clone(attrs=mattrs).exchange()
+    shard_randoms = get_random_catalog(pattrs, seed=84).clone(attrs=mattrs).exchange()
     growth_rate, bias = 0.8, 2.
     niterations = 3
     threshold_randoms = ('noise', 0.01)
@@ -124,7 +124,7 @@ def test_iterative_fft_particle():
     from pyrecon import IterativeFFTParticleReconstruction as RefIterativeFFTParticleReconstruction
 
     for los in [None, 'x', 'y', 'z']:
-        ref_data, ref_randoms = allgather_particles(data), allgather_particles(randoms)
+        ref_data, ref_randoms = allgather_particles(shard_data), allgather_particles(shard_randoms)
         recon = RefIterativeFFTParticleReconstruction(f=growth_rate, bias=bias, data_positions=ref_data.positions, data_weights=ref_data.weights,
                                                       randoms_positions=ref_randoms.positions, randoms_weights=ref_randoms.weights,
                                                        boxsize=mattrs.boxsize, boxcenter=mattrs.boxcenter, nmesh=mattrs.meshsize, los=los, mpiroot=0,
@@ -135,8 +135,8 @@ def test_iterative_fft_particle():
         ref_data_shifts = {field: recon.read_shifts('data', field=field) for field in fields}
         ref_data_shifted_positions = {field: recon.read_shifted_positions('data', field=field) for field in fields}
 
-        data = data.exchange(return_inverse=True)
-        randoms = randoms.exchange(return_inverse=True)
+        data = shard_data.exchange(return_inverse=True)
+        randoms = shard_randoms.exchange(return_inverse=True)
         fkp = FKPField(data, randoms, attrs=mattrs)
         recon = jax.jit(IterativeFFTParticleReconstruction, static_argnames=['los', 'halo_add', 'niterations'])(fkp, growth_rate=growth_rate, bias=bias, los=los, halo_add=3, niterations=niterations)
         shifts = {field: allgather(randoms.exchange_inverse(recon.read_shifts(randoms, field=field))) for field in fields}
