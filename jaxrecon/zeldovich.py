@@ -13,8 +13,26 @@ def kernel_gaussian(mattrs: MeshAttrs, smoothing_radius=15.):
     return jnp.exp(- 0.5 * sum((kk * smoothing_radius)**2 for kk in mattrs.kcoords(sparse=True)))
 
 
+@jax.jit
 def estimate_mesh_delta(mesh_data: RealMeshField | ComplexMeshField, mesh_randoms: RealMeshField | ComplexMeshField=None, threshold_randoms: float | jax.Array=None, smoothing_radius: float=15.):
+    """Estimate density contrast mesh from data and randoms meshes.
 
+    Parameters
+    ----------
+    mesh_data : RealMeshField | ComplexMeshField
+        Data mesh.
+    mesh_randoms : RealMeshField | ComplexMeshField, optional
+        Randoms mesh.
+    threshold_randoms : float | jax.Array, optional
+        Threshold on randoms mesh to avoid division by small numbers.
+    smoothing_radius : float, default=15.
+        Gaussian smoothing radius in mesh units.
+
+    Returns
+    -------
+    mesh_delta : RealMeshField
+        Density contrast mesh.
+    """
     mattrs = mesh_data.attrs
 
     def _2r(mesh):
@@ -63,7 +81,27 @@ def _get_threshold_randoms(randoms, threshold_randoms: float=0.01):
 
 
 def estimate_particle_delta(fkp: ParticleField | FKPField, resampler: str='cic', halo_add: int=0, smoothing_radius: float=15., threshold_randoms: float=0.01):
+    """
+    Estimate density contrast mesh from particle field or FKP field.
 
+    Parameters
+    ----------
+    fkp : ParticleField | FKPField
+        Particle or FKP field.
+    resampler : str, default='cic'
+        Resampler to use.
+    halo_add : int, default=0
+        Halo model addition.
+    smoothing_radius : float, default=15.
+        Gaussian smoothing radius in mesh units.
+    threshold_randoms : float, default=0.01
+        Threshold on randoms mesh to avoid division by small numbers.
+
+    Returns
+    -------
+    mesh_delta : RealMeshField
+        Density contrast mesh.
+    """
     data, randoms = fkp, None
     if isinstance(fkp, FKPField):
         data, randoms = fkp.data, fkp.randoms
@@ -109,10 +147,10 @@ class BaseReconstruction(object):
         self._kw_resampler = {name: kwargs.pop(name) for name in ['resampler', 'halo_add'] if name in kwargs}
         if not isinstance(delta, RealMeshField):
             delta = estimate_particle_delta(delta, **self._kw_resampler, **{name: kwargs.pop(name) for name in ['smoothing_radius', 'threshold_randoms'] if name in kwargs})
-        self._growth_rate = growth_rate
-        self._bias = bias
         self.mattrs = delta.attrs
         self.los = _format_los(los=los)
+        self._growth_rate = growth_rate
+        self._bias = bias
         self._run(delta, **kwargs)
 
     def growth_rate(self, distance: jax.Array=None):
@@ -152,6 +190,8 @@ class BaseReconstruction(object):
             Positions of shape (N, 3).
         field : str, default='disp+rsd'
             Either 'disp' (Zeldovich displacement), 'rsd' (RSD displacement), or 'disp+rsd' (Zeldovich + RSD displacement).
+        kwargs : dict, optional
+            Additional keyword arguments passed to the resampler, e.g. resampler='cic'.
 
         Returns
         -------
@@ -192,6 +232,10 @@ class BaseReconstruction(object):
             Positions of shape (N, 3).
         field : str, default='disp+rsd'
             Apply either 'disp' (Zeldovich displacement), 'rsd' (RSD displacement), or 'disp+rsd' (Zeldovich + RSD displacement).
+        wrap : bool, default=False
+            Whether to wrap output positions in the box.
+        kwargs : dict, optional
+            Additional keyword arguments passed to the resampler, e.g. resampler='cic'.
 
         Returns
         -------
@@ -205,7 +249,26 @@ class BaseReconstruction(object):
         if wrap: positions = (positions - offset) % self.mattrs.boxsize + offset
         return positions
 
+    def tree_flatten(self):
+        children = {name: getattr(self, name) for name in ['mattrs', '_growth_rate', '_bias', 'mesh_psi'] if hasattr(self, name)}
+        aux_data = {'los': self.los, '_kw_resampler': self._kw_resampler}
+        for name in ['_growth_rate', '_bias']:
+            if callable(children[name]):
+                aux_data[name] = children.pop(name)
+        aux_data['children_names'] = list(children.keys())
+        return tuple(children.values()), aux_data
 
+    @classmethod
+    def tree_unflatten(cls, aux_data, children):
+        new = cls.__new__(cls)
+        aux_data = dict(aux_data)
+        children_names = aux_data.pop('children_names')
+        new.__dict__.update({name: value for name, value in zip(children_names, children)})
+        new.__dict__.update(aux_data)
+        return new
+
+
+@jax.tree_util.register_pytree_node_class
 class PlaneParallelFFTReconstruction(BaseReconstruction):
 
     def _run(self, mesh_delta):
@@ -228,10 +291,24 @@ class PlaneParallelFFTReconstruction(BaseReconstruction):
         self.mesh_psi = mesh_psis
 
 
+@jax.tree_util.register_pytree_node_class
 class IterativeFFTReconstruction(BaseReconstruction):
     """
     Implementation of Burden et al. 2015 (https://arxiv.org/abs/1504.02591)
     field-level (as opposed to :class:`IterativeFFTParticleReconstruction`) algorithm.
+
+    Parameters
+    ----------
+    delta : RealMeshField
+        Density contrast mesh.
+    growth_rate : float | Callable, default=0.
+        Growth rate, float or callable returning growth rate as a function of comoving distance.
+    bias : float | Callable, default=1.
+        Bias, float or callable returning bias as a function of comoving distance.
+    los : str | np.ndarray, optional
+        Line-of-sight, either 'x', 'y', 'z' for global los, or None for local los.
+    kwargs : dict, optional
+        Additional keyword arguments.
     """
 
     def _run(self, mesh_delta, niterations=3):
@@ -309,6 +386,7 @@ class IterativeFFTReconstruction(BaseReconstruction):
         return mesh_delta_real
 
 
+@jax.tree_util.register_pytree_node_class
 class IterativeFFTParticleReconstruction(BaseReconstruction):
 
     def __init__(self, particles: ParticleField | FKPField, growth_rate: float | Callable=0., bias: float | Callable=1., los: str | np.ndarray=None, **kwargs):
@@ -407,9 +485,10 @@ class IterativeFFTParticleReconstruction(BaseReconstruction):
             Cartesian positions.
             Pass string 'data' to get the displacements for the input data positions passed to :meth:`assign_data`.
             Note that in this case, shifts are read at the reconstructed data real-space positions.
-
         field : str, default='disp+rsd'
             Either 'disp' (Zeldovich displacement), 'rsd' (RSD displacement), or 'disp+rsd' (Zeldovich + RSD displacement).
+        kwargs : dict, optional
+            Additional keyword arguments passed to the resampler, e.g. resampler='cic'.
 
         Returns
         -------
@@ -460,20 +539,23 @@ class IterativeFFTParticleReconstruction(BaseReconstruction):
         shifts = _read_shifts(real_positions)
         return shifts + rsd
 
-    def read_shifted_positions(self, positions: jax.Array | ParticleField | str, field='disp+rsd', wrap: bool=False):
+    def read_shifted_positions(self, positions: jax.Array | ParticleField | str, field='disp+rsd', wrap: bool=False, **kwargs):
         """
         Read shifted positions i.e. the difference ``positions - self.read_shifts(positions, field=field)``.
         Output (and input) positions are wrapped if :attr:`wrap`.
 
         Parameters
         ----------
-        positions : array of shape (N, 3), string
+        positions : array of shape (N, 3), str
             Cartesian positions.
             Pass string 'data' to get the shift positions for the input data positions passed to :meth:`assign_data`.
             Note that in this case, shifts are read at the reconstructed data real-space positions.
-
-        field : string, default='disp+rsd'
-            Apply either 'disp' (Zeldovich displacement), 'rsd' (RSD displacement), or 'disp+rsd' (Zeldovich + RSD displacement).
+        field : str, default='disp+rsd'
+            Either 'disp' (Zeldovich displacement), 'rsd' (RSD displacement), or 'disp+rsd' (Zeldovich + RSD displacement).
+        wrap : bool, default=False
+            Whether to wrap output positions in the box.
+        kwargs : dict, optional
+            Additional keyword arguments passed to the resampler, e.g. resampler='cic'.
 
         Returns
         -------
@@ -481,10 +563,26 @@ class IterativeFFTParticleReconstruction(BaseReconstruction):
             Shifted positions.
         """
         positions = _format_positions(positions)
-        shifts = self.read_shifts(positions, field=field, position_type='pos', mpiroot=None)
+        shifts = self.read_shifts(positions, field=field, **kwargs)
         if isinstance(positions, str) and positions == 'data':
             positions = self.data.positions
         positions = positions - shifts
         offset = self.mattrs.boxcenter - self.mattrs.boxsize / 2.
         if wrap: positions = (positions - offset) % self.mattrs.boxsize + offset
         return positions
+
+        positions = _format_positions(positions)
+        shifts = self.read_shifts(positions, field=field, **kwargs)
+        positions = positions - shifts
+        offset = self.mattrs.boxcenter - self.mattrs.boxsize / 2.
+        if wrap: positions = (positions - offset) % self.mattrs.boxsize + offset
+        return positions
+
+    def tree_flatten(self):
+        children = {name: getattr(self, name) for name in ['mattrs', '_growth_rate', '_bias', 'mesh_psi', 'data', 'data_rec'] if hasattr(self, name)}
+        aux_data = {'los': self.los, '_kw_resampler': self._kw_resampler}
+        for name in ['_growth_rate', '_bias']:
+            if callable(children[name]):
+                aux_data[name] = children.pop(name)
+        aux_data['children_names'] = list(children.keys())
+        return tuple(children.values()), aux_data

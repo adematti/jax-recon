@@ -5,7 +5,7 @@ import jax
 from jax import numpy as jnp
 
 from jaxpower import FKPField, generate_uniform_particles, MeshAttrs, create_sharding_mesh
-from jaxrecon.zeldovich import PlaneParallelFFTReconstruction, IterativeFFTReconstruction, IterativeFFTParticleReconstruction
+from jaxrecon.zeldovich import PlaneParallelFFTReconstruction, IterativeFFTReconstruction, IterativeFFTParticleReconstruction, estimate_particle_delta
 
 
 def get_random_catalog(mattrs, size=100000, seed=42):
@@ -61,14 +61,20 @@ def test_plane_parallel():
                                                   randoms_positions=ref_randoms.positions, randoms_weights=ref_randoms.weights,
                                                   boxsize=mattrs.boxsize, boxcenter=mattrs.boxcenter, nmesh=mattrs.meshsize, los=los, mpiroot=0,
                                                   dtype='c16', threshold_randoms=threshold_randoms)
-        ref_shifts = recon.read_shifts(ref_randoms.positions)
+        fields = ['rsd', 'disp', 'disp+rsd']
+        ref_shifts = {field: recon.read_shifts(ref_randoms.positions, field=field) for field in fields}
+        ref_shifted_positions = {field: recon.read_shifted_positions(ref_randoms.positions, field=field) for field in fields}
         data = data.exchange(return_inverse=True)
         randoms = randoms.exchange(return_inverse=True)
         fkp = FKPField(data, randoms, attrs=mattrs)
-        recon = PlaneParallelFFTReconstruction(fkp, growth_rate=growth_rate, bias=bias, los=los, threshold_randoms=threshold_randoms)
-        shifts = allgather(randoms.exchange_inverse(recon.read_shifts(randoms)))
+        delta = estimate_particle_delta(fkp, threshold_randoms=threshold_randoms)
+        recon = jax.jit(PlaneParallelFFTReconstruction, static_argnames=['los'])(delta, growth_rate=growth_rate, bias=bias, los=los)
+        shifts = {field: allgather(randoms.exchange_inverse(recon.read_shifts(randoms, field=field))) for field in fields}
+        shifted_positions = {field: allgather(randoms.exchange_inverse(recon.read_shifted_positions(randoms, field=field))) for field in fields}
         assert np.allclose(allgather(randoms.exchange_inverse(randoms.positions)), ref_randoms.positions)
-        assert np.allclose(shifts, ref_shifts)
+        for field in fields:
+            assert np.allclose(shifts[field], ref_shifts[field])
+            assert np.allclose(shifted_positions[field], ref_shifted_positions[field])
 
 
 def test_iterative_fft():
@@ -90,14 +96,19 @@ def test_iterative_fft():
                                               randoms_positions=ref_randoms.positions, randoms_weights=ref_randoms.weights,
                                               boxsize=mattrs.boxsize, boxcenter=mattrs.boxcenter, nmesh=mattrs.meshsize, los=los, mpiroot=0,
                                               threshold_randoms=threshold_randoms)
-        ref_shifts = recon.read_shifts(ref_randoms.positions)
-
+        fields = ['rsd', 'disp', 'disp+rsd']
+        ref_shifts = {field: recon.read_shifts(ref_randoms.positions, field=field) for field in fields}
+        ref_shifted_positions = {field: recon.read_shifted_positions(ref_randoms.positions, field=field) for field in fields}
         data = data.exchange(return_inverse=True)
         randoms = randoms.exchange(return_inverse=True)
         fkp = FKPField(data, randoms, attrs=mattrs)
-        recon = IterativeFFTReconstruction(fkp, growth_rate=growth_rate, bias=bias, los=los, niterations=niterations, threshold_randoms=threshold_randoms)
-        shifts = allgather(randoms.exchange_inverse(recon.read_shifts(randoms)))
-        assert np.allclose(shifts, ref_shifts)
+        delta = estimate_particle_delta(fkp, threshold_randoms=threshold_randoms)
+        recon = jax.jit(IterativeFFTReconstruction, static_argnames=['los', 'niterations'])(delta, growth_rate=growth_rate, bias=bias, los=los, niterations=niterations)
+        shifts = {field: allgather(randoms.exchange_inverse(recon.read_shifts(randoms, field=field))) for field in fields}
+        shifted_positions = {field: allgather(randoms.exchange_inverse(recon.read_shifted_positions(randoms, field=field))) for field in fields}
+        for field in fields:
+            assert np.allclose(shifts[field], ref_shifts[field])
+            assert np.allclose(shifted_positions[field], ref_shifted_positions[field])
 
 
 def test_iterative_fft_particle():
@@ -117,18 +128,26 @@ def test_iterative_fft_particle():
         recon = RefIterativeFFTParticleReconstruction(f=growth_rate, bias=bias, data_positions=ref_data.positions, data_weights=ref_data.weights,
                                                       randoms_positions=ref_randoms.positions, randoms_weights=ref_randoms.weights,
                                                        boxsize=mattrs.boxsize, boxcenter=mattrs.boxcenter, nmesh=mattrs.meshsize, los=los, mpiroot=0,
-                                                       niterations=niterations, threshold_randoms=threshold_randoms)
-        ref_shifts = recon.read_shifts(ref_randoms.positions)
-        ref_data_shifts = recon.read_shifts('data')
+                                                       niterations=niterations, threshold_randoms=threshold_randoms, wrap=True)
+        fields = ['rsd', 'disp', 'disp+rsd']
+        ref_shifts = {field: recon.read_shifts(ref_randoms.positions, field=field) for field in fields}
+        ref_shifted_positions = {field: recon.read_shifted_positions(ref_randoms.positions, field=field) for field in fields}
+        ref_data_shifts = {field: recon.read_shifts('data', field=field) for field in fields}
+        ref_data_shifted_positions = {field: recon.read_shifted_positions('data', field=field) for field in fields}
 
         data = data.exchange(return_inverse=True)
         randoms = randoms.exchange(return_inverse=True)
         fkp = FKPField(data, randoms, attrs=mattrs)
-        recon = IterativeFFTParticleReconstruction(fkp, growth_rate=growth_rate, bias=bias, los=los, halo_add=3, niterations=niterations, threshold_randoms=threshold_randoms)
-        shifts = allgather(randoms.exchange_inverse(recon.read_shifts(randoms)))
-        data_shifts = allgather(data.exchange_inverse(recon.read_shifts('data')))
-        assert np.allclose(ref_shifts, shifts)
-        assert np.allclose(ref_data_shifts, data_shifts)
+        recon = jax.jit(IterativeFFTParticleReconstruction, static_argnames=['los', 'halo_add', 'niterations'])(fkp, growth_rate=growth_rate, bias=bias, los=los, halo_add=3, niterations=niterations)
+        shifts = {field: allgather(randoms.exchange_inverse(recon.read_shifts(randoms, field=field))) for field in fields}
+        shifted_positions = {field: allgather(randoms.exchange_inverse(recon.read_shifted_positions(randoms, field=field, wrap=True))) for field in fields}
+        data_shifts = {field: allgather(data.exchange_inverse(recon.read_shifts('data', field=field))) for field in fields}
+        data_shifted_positions = {field: allgather(data.exchange_inverse(recon.read_shifted_positions('data', field=field, wrap=True))) for field in fields}
+        for field in fields:
+            assert np.allclose(ref_shifts[field], shifts[field])
+            assert np.allclose(ref_data_shifts[field], data_shifts[field])
+            assert np.allclose(ref_shifted_positions[field], shifted_positions[field])
+            assert np.allclose(ref_data_shifted_positions[field], data_shifted_positions[field])
 
 
 if __name__ == '__main__':
